@@ -37,7 +37,6 @@ def load_and_clean_data(file_obj, filename):
     df = pd.read_csv(file_obj)
     building, floor, area_code, area_name = parse_filename(filename)
     
-    # Updated: Changed 'Lux' to 'Luminance' for non-technical users
     if area_code in ['COL', 'COR', 'MEL']:
         rename_dict = {
             'field1': 'TypeA_Temp', 'field2': 'TypeA_Hum',
@@ -264,7 +263,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         else:
             st.warning("Missing CO2 sensor required for this alert.")
 
-    # --- TAB 3: FREEZER ZONE ---
+    # --- TAB 3: FREEZER Zone ---
     with tab3:
         st.subheader("Overcooling / Freezer Zone")
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
@@ -305,14 +304,26 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             
             if len(flatlines) > 0:
                 flatline_detected = True
-                st.error(f"⚠️ **Hardware Fault Detected:** '{sensor}' flatlined for a 4+ hour period.")
+                st.error(f"⚠️ **Hardware Fault Detected:** '{sensor}' experienced flatlining.")
                 
-                # Extract details to show exactly when the fault occurred
+                # Group contiguous flatline readings into summary events
                 fault_details = flatlines[['created_at', sensor]].copy()
-                fault_details.rename(columns={'created_at': 'Timestamp of Fault', sensor: 'Frozen Value'}, inplace=True)
+                fault_details['time_diff'] = fault_details['created_at'].diff()
                 
-                with st.expander(f"🔍 View exact dates and times for {sensor} fault"):
-                    st.dataframe(fault_details, use_container_width=True)
+                # If gap is > 30 minutes, it's considered a new flatline event
+                fault_details['event_id'] = (fault_details['time_diff'] > pd.Timedelta(minutes=30)).cumsum()
+                
+                summary_df = fault_details.groupby('event_id').agg(
+                    Date=('created_at', lambda x: x.min().strftime('%Y-%m-%d')),
+                    From=('created_at', lambda x: x.min().strftime('%H:%M')),
+                    To=('created_at', lambda x: x.max().strftime('%H:%M')),
+                    Frozen_Value=(sensor, 'first')
+                ).reset_index(drop=True)
+                
+                summary_df.rename(columns={'Frozen_Value': 'Frozen Value'}, inplace=True)
+                
+                with st.expander(f"🔍 View summary log for {sensor}"):
+                    st.dataframe(summary_df, use_container_width=True)
                 
         if not flatline_detected:
             st.success("✅ All sensors are actively fluctuating and reporting healthy data streams!")
