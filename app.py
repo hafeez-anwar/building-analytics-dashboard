@@ -204,6 +204,28 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
         col1, col2 = st.columns([1, 2])
         with col1:
             st.metric("Total Wasted Cooling Hours", f"{wasted_hours:.1f} hrs", help="Based on 10-minute sensor intervals.")
+            
+            # --- ADDED GAUGE CHART HERE ---
+            max_gauge_val = max(50, wasted_hours * 1.5) # Dynamically set the max limit
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=wasted_hours,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Wasted Hours Gauge"},
+                gauge={
+                    'axis': {'range': [None, max_gauge_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                    'bar': {'color': "#EF553B"}, # Red color for waste
+                    'bgcolor': "white",
+                    'borderwidth': 2,
+                    'bordercolor': "gray",
+                    'steps': [
+                        {'range': [0, max_gauge_val * 0.3], 'color': "#e6f2ff"},
+                        {'range': [max_gauge_val * 0.3, max_gauge_val * 0.7], 'color': "#cce5ff"}],
+                }
+            ))
+            fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig_gauge, use_container_width=True)
+
         with col2:
             waste_df = calc_df[calc_df['is_wasted_cooling']]
             if len(waste_df) > 0:
@@ -294,7 +316,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
             st.markdown("""
             **Condition for Flagging:**
-            * **`Exact Repeated Values` (over a 4-hour window):** Real-world environmental data always fluctuates slightly. If a sensor reports the *exact* same decimal value for 24+ consecutive readings (4+ hours), it has likely frozen or lost connection to the network.
+            * **`Time Duration >= 4 Hours`:** Real-world environmental data always fluctuates slightly. If a sensor reports the *exact* same decimal value for 4 continuous hours or more, it has likely frozen or lost connection to the network.
             """)
             
         flatline_detected = False
@@ -303,32 +325,35 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             group_col = f"{sensor}_group"
             calc_df[group_col] = (calc_df[sensor] != calc_df[sensor].shift()).cumsum()
             
-            # 2. Count how many readings are in each group
-            group_counts = calc_df.groupby(group_col).size()
+            # 2. Extract the first and last timestamp for every identical group
+            group_summary = calc_df.groupby(group_col).agg(
+                From_DT=('created_at', 'min'),
+                To_DT=('created_at', 'max'),
+                Frozen_Value=(sensor, 'first')
+            )
             
-            # 3. Filter to groups that have 24 or more identical consecutive readings
-            flatline_groups = group_counts[group_counts >= 24].index
+            # 3. Mathematically calculate the exact time difference (duration)
+            group_summary['Duration'] = group_summary['To_DT'] - group_summary['From_DT']
             
-            if len(flatline_groups) > 0:
+            # 4. Filter strictly for durations that are 4 hours or longer
+            flatlines = group_summary[group_summary['Duration'] >= pd.Timedelta(hours=4)].copy()
+            
+            if not flatlines.empty:
                 flatline_detected = True
                 st.error(f"⚠️ **Hardware Fault Detected:** '{sensor}' experienced flatlining.")
                 
-                # 4. Extract just the rows corresponding to those flatline events
-                fault_details = calc_df[calc_df[group_col].isin(flatline_groups)]
+                # 5. Format the final output table
+                flatlines['Date'] = flatlines['From_DT'].dt.strftime('%Y-%m-%d')
+                flatlines['Day'] = flatlines['From_DT'].dt.strftime('%A')
+                flatlines['From'] = flatlines['From_DT'].dt.strftime('%H:%M')
+                flatlines['To'] = flatlines['To_DT'].dt.strftime('%H:%M')
                 
-                # 5. Summarize the exact start and end times
-                summary_df = fault_details.groupby(group_col).agg(
-                    Date=('created_at', lambda x: x.min().strftime('%Y-%m-%d')),
-                    Day=('created_at', lambda x: x.min().strftime('%A')),
-                    From=('created_at', lambda x: x.min().strftime('%H:%M')),
-                    To=('created_at', lambda x: x.max().strftime('%H:%M')),
-                    Frozen_Value=(sensor, 'first')
-                ).reset_index(drop=True)
-                
-                summary_df.rename(columns={'Frozen_Value': 'Frozen Value'}, inplace=True)
+                # Organize columns neatly
+                display_df = flatlines[['Date', 'Day', 'From', 'To', 'Frozen_Value']].reset_index(drop=True)
+                display_df.rename(columns={'Frozen_Value': 'Frozen Value'}, inplace=True)
                 
                 with st.expander(f"🔍 View summary log for {sensor}"):
-                    st.dataframe(summary_df, use_container_width=True)
+                    st.dataframe(display_df, use_container_width=True)
                 
         if not flatline_detected:
             st.success("✅ All sensors are actively fluctuating and reporting healthy data streams!")
