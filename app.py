@@ -205,8 +205,8 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
         with col1:
             st.metric("Total Wasted Cooling Hours", f"{wasted_hours:.1f} hrs", help="Based on 10-minute sensor intervals.")
             
-            # --- ADDED GAUGE CHART HERE ---
-            max_gauge_val = max(50, wasted_hours * 1.5) # Dynamically set the max limit
+            # Gauge Chart
+            max_gauge_val = max(50, wasted_hours * 1.5) 
             fig_gauge = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=wasted_hours,
@@ -214,7 +214,7 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                 title={'text': "Wasted Hours Gauge"},
                 gauge={
                     'axis': {'range': [None, max_gauge_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "#EF553B"}, # Red color for waste
+                    'bar': {'color': "#EF553B"},
                     'bgcolor': "white",
                     'borderwidth': 2,
                     'bordercolor': "gray",
@@ -342,14 +342,16 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
                 flatline_detected = True
                 st.error(f"⚠️ **Hardware Fault Detected:** '{sensor}' experienced flatlining.")
                 
-                # 5. Format the final output table
-                flatlines['Date'] = flatlines['From_DT'].dt.strftime('%Y-%m-%d')
+                # 5. Format the final output table with End Dates and Duration
+                flatlines['Start Date'] = flatlines['From_DT'].dt.strftime('%Y-%m-%d')
                 flatlines['Day'] = flatlines['From_DT'].dt.strftime('%A')
-                flatlines['From'] = flatlines['From_DT'].dt.strftime('%H:%M')
-                flatlines['To'] = flatlines['To_DT'].dt.strftime('%H:%M')
+                flatlines['From Time'] = flatlines['From_DT'].dt.strftime('%H:%M')
+                flatlines['End Date'] = flatlines['To_DT'].dt.strftime('%Y-%m-%d')
+                flatlines['To Time'] = flatlines['To_DT'].dt.strftime('%H:%M')
+                flatlines['Total Hours'] = (flatlines['Duration'].dt.total_seconds() / 3600).round(1)
                 
                 # Organize columns neatly
-                display_df = flatlines[['Date', 'Day', 'From', 'To', 'Frozen_Value']].reset_index(drop=True)
+                display_df = flatlines[['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Hours', 'Frozen_Value']].reset_index(drop=True)
                 display_df.rename(columns={'Frozen_Value': 'Frozen Value'}, inplace=True)
                 
                 with st.expander(f"🔍 View summary log for {sensor}"):
