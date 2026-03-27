@@ -37,16 +37,17 @@ def load_and_clean_data(file_obj, filename):
     df = pd.read_csv(file_obj)
     building, floor, area_code, area_name = parse_filename(filename)
     
+    # Updated: Changed 'Lux' to 'Luminance' for non-technical users
     if area_code in ['COL', 'COR', 'MEL']:
         rename_dict = {
             'field1': 'TypeA_Temp', 'field2': 'TypeA_Hum',
             'field4': 'TypeB_Temp', 'field5': 'TypeB_Hum',
-            'field6': 'TypeB_CO2_ppm', 'field7': 'TypeB_Lux'
+            'field6': 'TypeB_CO2_ppm', 'field7': 'TypeB_Luminance'
         }
     elif area_code == 'LIL':
         rename_dict = {
             'field1': 'TypeB_Temp', 'field2': 'TypeB_Hum',
-            'field3': 'TypeB_CO2_ppm', 'field4': 'TypeB_Lux'
+            'field3': 'TypeB_CO2_ppm', 'field4': 'TypeB_Luminance'
         }
     else:
         rename_dict = {col: col for col in df.columns if 'field' in col}
@@ -185,21 +186,20 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
     st.title("HVAC Energy Waste Detector")
     st.markdown("Identifies times when the area is likely unoccupied, but the HVAC is still actively cooling.")
     
-    # --- THRESHOLD EXPLANATION UI ---
     with st.expander("⚙️ View Algorithm Logic & Thresholds"):
         st.markdown("""
         **How do we define 'Wasted Cooling'?** An event is flagged as waste if ALL three of the following conditions are met simultaneously:
-        * **`Lux < 10` (Lights Off):** Standard office/corridor lighting is >150 Lux. Values under 10 indicate darkness or minimal emergency lighting.
+        * **`Luminance < 10` (Lights Off):** Standard office/corridor lighting is >150 Luminance. Values under 10 indicate darkness or minimal emergency lighting.
         * **`CO2 < 600 ppm` (Unoccupied):** Outdoor baseline CO2 is ~400-450 ppm. Human respiration quickly pushes indoor spaces above 600+ ppm. If it is below 600, the zone is effectively empty.
         * **`Temperature < 26.0°C` (Actively Cooled):** 26°C (78.8°F) is a standard upper-limit setpoint for commercial cooling. Maintaining temps lower than this in an empty, dark hallway is a direct waste of energy.
         """)
     
-    req_sensors = ['TypeB_Lux', 'TypeB_CO2_ppm', 'TypeB_Temp']
+    req_sensors = ['TypeB_Luminance', 'TypeB_CO2_ppm', 'TypeB_Temp']
     if not all(s in original_df.columns for s in req_sensors):
         st.error("Missing required sensors for this analysis.")
     else:
         calc_df = original_df.copy()
-        calc_df['is_wasted_cooling'] = (calc_df['TypeB_Lux'] < 10) & (calc_df['TypeB_CO2_ppm'] < 600) & (calc_df['TypeB_Temp'] < 26.0)
+        calc_df['is_wasted_cooling'] = (calc_df['TypeB_Luminance'] < 10) & (calc_df['TypeB_CO2_ppm'] < 600) & (calc_df['TypeB_Temp'] < 26.0)
         wasted_hours = len(calc_df[calc_df['is_wasted_cooling']]) / 6
         
         col1, col2 = st.columns([1, 2])
@@ -226,21 +226,21 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
             st.markdown("""
             **Condition for Flagging:**
-            * **`Lux > 100`:** Lights are actively turned on.
+            * **`Luminance > 100`:** Lights are actively turned on.
             * **`CO2 < 450 ppm`:** Absolute baseline atmospheric CO2, proving zero human presence in the area. 
             """)
         
-        if 'TypeB_Lux' in calc_df.columns and 'TypeB_CO2_ppm' in calc_df.columns:
-            calc_df['ghost_light'] = (calc_df['TypeB_Lux'] > 100) & (calc_df['TypeB_CO2_ppm'] < 450)
+        if 'TypeB_Luminance' in calc_df.columns and 'TypeB_CO2_ppm' in calc_df.columns:
+            calc_df['ghost_light'] = (calc_df['TypeB_Luminance'] > 100) & (calc_df['TypeB_CO2_ppm'] < 450)
             ghost_df = calc_df[calc_df['ghost_light']]
             ghost_hours = len(ghost_df) / 6
             
             st.metric("Total Wasted Lighting Hours", f"{ghost_hours:.1f} hrs")
             if ghost_hours > 0:
-                fig_ghost = px.scatter(ghost_df, x='created_at', y='TypeB_Lux', color_discrete_sequence=['gold'], title="Instances of Ghost Lighting")
+                fig_ghost = px.scatter(ghost_df, x='created_at', y='TypeB_Luminance', color_discrete_sequence=['gold'], title="Instances of Ghost Lighting")
                 st.plotly_chart(fig_ghost, use_container_width=True)
         else:
-            st.warning("Missing Lux or CO2 sensors required for this alert.")
+            st.warning("Missing Luminance or CO2 sensors required for this alert.")
 
     # --- TAB 2: VENTILATION FAILURE ---
     with tab2:
@@ -271,12 +271,12 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             st.markdown("""
             **Condition for Flagging:**
             * **`CO2 > 600 ppm`:** The zone is actively occupied.
-            * **`Lux > 50`:** Confirms the area is in use.
+            * **`Luminance > 50`:** Confirms the area is in use.
             * **`Temp < 21.0°C` (69.8°F):** Drops below the standard ASHRAE 55 thermal comfort baseline for typical office attire, indicating the system is overcooling the occupants.
             """)
             
-        if all(s in calc_df.columns for s in ['TypeB_Lux', 'TypeB_CO2_ppm', 'TypeB_Temp']):
-            calc_df['freezer_zone'] = (calc_df['TypeB_CO2_ppm'] > 600) & (calc_df['TypeB_Lux'] > 50) & (calc_df['TypeB_Temp'] < 21.0)
+        if all(s in calc_df.columns for s in ['TypeB_Luminance', 'TypeB_CO2_ppm', 'TypeB_Temp']):
+            calc_df['freezer_zone'] = (calc_df['TypeB_CO2_ppm'] > 600) & (calc_df['TypeB_Luminance'] > 50) & (calc_df['TypeB_Temp'] < 21.0)
             freeze_df = calc_df[calc_df['freezer_zone']]
             freeze_hours = len(freeze_df) / 6
             
@@ -287,7 +287,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             else:
                 st.success("No overcooling detected! The thermostat is well balanced.")
         else:
-            st.warning("Missing Temp, Lux, or CO2 sensors required for this alert.")
+            st.warning("Missing Temp, Luminance, or CO2 sensors required for this alert.")
 
     # --- TAB 4: SENSOR HEALTH ---
     with tab4:
@@ -306,6 +306,13 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             if len(flatlines) > 0:
                 flatline_detected = True
                 st.error(f"⚠️ **Hardware Fault Detected:** '{sensor}' flatlined for a 4+ hour period.")
+                
+                # Extract details to show exactly when the fault occurred
+                fault_details = flatlines[['created_at', sensor]].copy()
+                fault_details.rename(columns={'created_at': 'Timestamp of Fault', sensor: 'Frozen Value'}, inplace=True)
+                
+                with st.expander(f"🔍 View exact dates and times for {sensor} fault"):
+                    st.dataframe(fault_details, use_container_width=True)
                 
         if not flatline_detected:
             st.success("✅ All sensors are actively fluctuating and reporting healthy data streams!")
