@@ -285,6 +285,30 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
                 fig_vent = px.scatter(vent_df, x='created_at', y='CO2_Rolling_Avg', color_discrete_sequence=['darkorange'], title="Sustained High CO2 Events (30-Min Avg)")
                 fig_vent.add_hline(y=1000, line_dash="dash", line_color="red", annotation_text="ASHRAE Limit")
                 st.plotly_chart(fig_vent, use_container_width=True)
+                
+                # --- NEW: Event Grouping and Logging ---
+                calc_df['vent_group'] = (calc_df['poor_ventilation'] != calc_df['poor_ventilation'].shift()).cumsum()
+                event_summary = calc_df[calc_df['poor_ventilation']].groupby('vent_group').agg(
+                    From_DT=('created_at', 'min'),
+                    To_DT=('created_at', 'max'),
+                    Avg_CO2=('TypeB_CO2_ppm', 'mean') # Actual average during the incident
+                )
+                
+                # Add 10 mins to account for the width of the final reading
+                event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT'] + pd.Timedelta(minutes=10)
+                
+                event_summary['Start Date'] = event_summary['From_DT'].dt.strftime('%Y-%m-%d')
+                event_summary['Day'] = event_summary['From_DT'].dt.strftime('%A')
+                event_summary['From Time'] = event_summary['From_DT'].dt.strftime('%H:%M')
+                event_summary['End Date'] = event_summary['To_DT'].dt.strftime('%Y-%m-%d')
+                event_summary['To Time'] = event_summary['To_DT'].dt.strftime('%H:%M')
+                event_summary['Total Hours'] = (event_summary['Duration'].dt.total_seconds() / 3600).round(2)
+                event_summary['Avg CO2 (ppm)'] = event_summary['Avg_CO2'].round(0)
+                
+                display_vent = event_summary[['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Hours', 'Avg CO2 (ppm)']].reset_index(drop=True)
+                
+                with st.expander("🔍 View Detailed Fault Log"):
+                    st.dataframe(display_vent, use_container_width=True)
             else:
                 st.success("Air quality is excellent! No sustained stuffy periods detected.")
         else:
@@ -298,11 +322,11 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             **Condition for Flagging:**
             * **`CO2 30-Min Average > 600 ppm`:** The zone is actively and consistently occupied.
             * **`Luminance 30-Min Average > 50`:** Confirms the area is steadily in use.
-            * **`Temp 30-Min Average < 21.0°C` (69.8°F):** Drops below the standard ASHRAE 55 thermal comfort baseline for 30+ minutes, indicating the system is actively overcooling the occupants rather than just experiencing a brief draft.
+            * **`Temp 30-Min Average < 21.0°C` (69.8°F):** Drops below the standard ASHRAE 55 thermal comfort baseline for 30+ minutes, indicating the system is actively overcooling the occupants.
             """)
             
         if all(s in calc_df.columns for s in ['TypeB_Luminance', 'TypeB_CO2_ppm', 'TypeB_Temp']):
-            # Apply 30-minute rolling averages to smooth out transient drafts, shadows, or brief sensor glitches
+            # Apply 30-minute rolling averages
             calc_df['CO2_Rolling_Avg'] = calc_df['TypeB_CO2_ppm'].rolling(window=3, min_periods=1).mean()
             calc_df['Lum_Rolling_Avg'] = calc_df['TypeB_Luminance'].rolling(window=3, min_periods=1).mean()
             calc_df['Temp_Rolling_Avg'] = calc_df['TypeB_Temp'].rolling(window=3, min_periods=1).mean()
@@ -315,6 +339,29 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
             if freeze_hours > 0:
                 fig_freeze = px.scatter(freeze_df, x='created_at', y='Temp_Rolling_Avg', color_discrete_sequence=['blue'], title="Sustained Overcooling Events (30-Min Avg)")
                 st.plotly_chart(fig_freeze, use_container_width=True)
+                
+                # --- NEW: Event Grouping and Logging ---
+                calc_df['freeze_group'] = (calc_df['freezer_zone'] != calc_df['freezer_zone'].shift()).cumsum()
+                event_summary = calc_df[calc_df['freezer_zone']].groupby('freeze_group').agg(
+                    From_DT=('created_at', 'min'),
+                    To_DT=('created_at', 'max'),
+                    Avg_Temp=('TypeB_Temp', 'mean') # Actual average temp during the incident
+                )
+                
+                event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT'] + pd.Timedelta(minutes=10)
+                
+                event_summary['Start Date'] = event_summary['From_DT'].dt.strftime('%Y-%m-%d')
+                event_summary['Day'] = event_summary['From_DT'].dt.strftime('%A')
+                event_summary['From Time'] = event_summary['From_DT'].dt.strftime('%H:%M')
+                event_summary['End Date'] = event_summary['To_DT'].dt.strftime('%Y-%m-%d')
+                event_summary['To Time'] = event_summary['To_DT'].dt.strftime('%H:%M')
+                event_summary['Total Hours'] = (event_summary['Duration'].dt.total_seconds() / 3600).round(2)
+                event_summary['Avg Temp (°C)'] = event_summary['Avg_Temp'].round(2)
+                
+                display_freeze = event_summary[['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Hours', 'Avg Temp (°C)']].reset_index(drop=True)
+                
+                with st.expander("🔍 View Detailed Fault Log"):
+                    st.dataframe(display_freeze, use_container_width=True)
             else:
                 st.success("No sustained overcooling detected! The thermostat is well balanced.")
         else:
