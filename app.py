@@ -315,6 +315,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
                 
                 summary_df = fault_details.groupby('event_id').agg(
                     Date=('created_at', lambda x: x.min().strftime('%Y-%m-%d')),
+                    Day=('created_at', lambda x: x.min().strftime('%A')), # Added Day column here
                     From=('created_at', lambda x: x.min().strftime('%H:%M')),
                     To=('created_at', lambda x: x.max().strftime('%H:%M')),
                     Frozen_Value=(sensor, 'first')
