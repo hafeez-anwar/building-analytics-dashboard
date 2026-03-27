@@ -269,19 +269,24 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
             st.markdown("""
             **Condition for Flagging:**
-            * **`CO2 >= 1000 ppm`:** Based on ASHRAE 62.1 standards for indoor air quality. Levels consistently above 1000 ppm indicate inadequate fresh air intake, leading to occupant drowsiness and complaints.
+            * **`CO2 30-Min Average >= 1000 ppm`:** Based on ASHRAE 62.1 standards. A 30-minute rolling average filters out brief sensor spikes or transient crowds. Sustained levels above 1000 ppm indicate inadequate fresh air intake.
             """)
             
         if 'TypeB_CO2_ppm' in calc_df.columns:
-            calc_df['poor_ventilation'] = calc_df['TypeB_CO2_ppm'] >= 1000
+            # Calculate a 30-minute (3 rows) rolling average to smooth out spikes
+            calc_df['CO2_Rolling_Avg'] = calc_df['TypeB_CO2_ppm'].rolling(window=3, min_periods=1).mean()
+            
+            calc_df['poor_ventilation'] = calc_df['CO2_Rolling_Avg'] >= 1000
             vent_df = calc_df[calc_df['poor_ventilation']]
             vent_hours = len(vent_df) / 6
             
-            st.metric("Total Hours > 1000 ppm", f"{vent_hours:.1f} hrs")
+            st.metric("Total Sustained Hours > 1000 ppm", f"{vent_hours:.1f} hrs")
             if vent_hours > 0:
-                fig_vent = px.scatter(vent_df, x='created_at', y='TypeB_CO2_ppm', color_discrete_sequence=['darkorange'], title="High CO2 Events")
+                fig_vent = px.scatter(vent_df, x='created_at', y='CO2_Rolling_Avg', color_discrete_sequence=['darkorange'], title="Sustained High CO2 Events (30-Min Avg)")
                 fig_vent.add_hline(y=1000, line_dash="dash", line_color="red", annotation_text="ASHRAE Limit")
                 st.plotly_chart(fig_vent, use_container_width=True)
+            else:
+                st.success("Air quality is excellent! No sustained stuffy periods detected.")
         else:
             st.warning("Missing CO2 sensor required for this alert.")
 
@@ -291,22 +296,27 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
             st.markdown("""
             **Condition for Flagging:**
-            * **`CO2 > 600 ppm`:** The zone is actively occupied.
-            * **`Luminance > 50`:** Confirms the area is in use.
-            * **`Temp < 21.0°C` (69.8°F):** Drops below the standard ASHRAE 55 thermal comfort baseline for typical office attire, indicating the system is overcooling the occupants.
+            * **`CO2 30-Min Average > 600 ppm`:** The zone is actively and consistently occupied.
+            * **`Luminance 30-Min Average > 50`:** Confirms the area is steadily in use.
+            * **`Temp 30-Min Average < 21.0°C` (69.8°F):** Drops below the standard ASHRAE 55 thermal comfort baseline for 30+ minutes, indicating the system is actively overcooling the occupants rather than just experiencing a brief draft.
             """)
             
         if all(s in calc_df.columns for s in ['TypeB_Luminance', 'TypeB_CO2_ppm', 'TypeB_Temp']):
-            calc_df['freezer_zone'] = (calc_df['TypeB_CO2_ppm'] > 600) & (calc_df['TypeB_Luminance'] > 50) & (calc_df['TypeB_Temp'] < 21.0)
+            # Apply 30-minute rolling averages to smooth out transient drafts, shadows, or brief sensor glitches
+            calc_df['CO2_Rolling_Avg'] = calc_df['TypeB_CO2_ppm'].rolling(window=3, min_periods=1).mean()
+            calc_df['Lum_Rolling_Avg'] = calc_df['TypeB_Luminance'].rolling(window=3, min_periods=1).mean()
+            calc_df['Temp_Rolling_Avg'] = calc_df['TypeB_Temp'].rolling(window=3, min_periods=1).mean()
+            
+            calc_df['freezer_zone'] = (calc_df['CO2_Rolling_Avg'] > 600) & (calc_df['Lum_Rolling_Avg'] > 50) & (calc_df['Temp_Rolling_Avg'] < 21.0)
             freeze_df = calc_df[calc_df['freezer_zone']]
             freeze_hours = len(freeze_df) / 6
             
-            st.metric("Total Overcooled Occupied Hours", f"{freeze_hours:.1f} hrs")
+            st.metric("Total Sustained Overcooled Hours", f"{freeze_hours:.1f} hrs")
             if freeze_hours > 0:
-                fig_freeze = px.scatter(freeze_df, x='created_at', y='TypeB_Temp', color_discrete_sequence=['blue'], title="Overcooling Events")
+                fig_freeze = px.scatter(freeze_df, x='created_at', y='Temp_Rolling_Avg', color_discrete_sequence=['blue'], title="Sustained Overcooling Events (30-Min Avg)")
                 st.plotly_chart(fig_freeze, use_container_width=True)
             else:
-                st.success("No overcooling detected! The thermostat is well balanced.")
+                st.success("No sustained overcooling detected! The thermostat is well balanced.")
         else:
             st.warning("Missing Temp, Luminance, or CO2 sensors required for this alert.")
 
