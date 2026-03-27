@@ -294,28 +294,32 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
             st.markdown("""
             **Condition for Flagging:**
-            * **`Standard Deviation == 0.0` (over a rolling 4-hour window):** Real-world environmental data always fluctuates slightly. If a sensor reports the *exact* same decimal value for 24 consecutive readings (4 hours), it has likely frozen or lost connection to the network.
+            * **`Exact Repeated Values` (over a 4-hour window):** Real-world environmental data always fluctuates slightly. If a sensor reports the *exact* same decimal value for 24+ consecutive readings (4+ hours), it has likely frozen or lost connection to the network.
             """)
             
         flatline_detected = False
         for sensor in sensors:
-            rolling_std = calc_df[sensor].rolling(window=24).std()
-            flatlines = calc_df[rolling_std == 0.0]
+            # 1. Create a grouping ID that increments every time the value changes
+            group_col = f"{sensor}_group"
+            calc_df[group_col] = (calc_df[sensor] != calc_df[sensor].shift()).cumsum()
             
-            if len(flatlines) > 0:
+            # 2. Count how many readings are in each group
+            group_counts = calc_df.groupby(group_col).size()
+            
+            # 3. Filter to groups that have 24 or more identical consecutive readings
+            flatline_groups = group_counts[group_counts >= 24].index
+            
+            if len(flatline_groups) > 0:
                 flatline_detected = True
                 st.error(f"⚠️ **Hardware Fault Detected:** '{sensor}' experienced flatlining.")
                 
-                # Group contiguous flatline readings into summary events
-                fault_details = flatlines[['created_at', sensor]].copy()
-                fault_details['time_diff'] = fault_details['created_at'].diff()
+                # 4. Extract just the rows corresponding to those flatline events
+                fault_details = calc_df[calc_df[group_col].isin(flatline_groups)]
                 
-                # If gap is > 30 minutes, it's considered a new flatline event
-                fault_details['event_id'] = (fault_details['time_diff'] > pd.Timedelta(minutes=30)).cumsum()
-                
-                summary_df = fault_details.groupby('event_id').agg(
+                # 5. Summarize the exact start and end times
+                summary_df = fault_details.groupby(group_col).agg(
                     Date=('created_at', lambda x: x.min().strftime('%Y-%m-%d')),
-                    Day=('created_at', lambda x: x.min().strftime('%A')), # Added Day column here
+                    Day=('created_at', lambda x: x.min().strftime('%A')),
                     From=('created_at', lambda x: x.min().strftime('%H:%M')),
                     To=('created_at', lambda x: x.max().strftime('%H:%M')),
                     Frozen_Value=(sensor, 'first')
