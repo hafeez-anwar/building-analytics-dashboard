@@ -203,14 +203,15 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
         calc_df['base_waste_cond'] = (calc_df['TypeB_Luminance'] < 10) & (calc_df['TypeB_CO2_ppm'] < 600) & (calc_df['TypeB_Temp'] < 26.0)
         
         # 2. Require the condition to be continuously true for 2 hours (12 periods)
-        # If the sum of the last 12 boolean values equals 12, it has been continuously true.
         calc_df['is_wasted_cooling'] = calc_df['base_waste_cond'].rolling(window=12, min_periods=12).sum() == 12
         
+        # Note: We calculate wasted hours using the true flagged rows (which excludes the buffer)
+        # for the high-level metric so it strictly represents purely wasted energy beyond the natural lag.
         wasted_hours = len(calc_df[calc_df['is_wasted_cooling']]) / 6
         
         col1, col2 = st.columns([1, 2])
         with col1:
-            st.metric("Total Sustained Wasted Hours", f"{wasted_hours:.1f} hrs", help="Excludes the 2-hour thermal lag buffer per event.")
+            st.metric("Total Sustained Wasted Hours", f"{wasted_hours:.1f} hrs", help="Excludes the initial 2-hour thermal lag buffer.")
             
             # Gauge Chart
             max_gauge_val = max(50, wasted_hours * 1.5) if wasted_hours > 0 else 50
@@ -242,12 +243,18 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                 # --- Event Grouping and Logging ---
                 calc_df['waste_group'] = (calc_df['is_wasted_cooling'] != calc_df['is_wasted_cooling'].shift()).cumsum()
                 event_summary = calc_df[calc_df['is_wasted_cooling']].groupby('waste_group').agg(
-                    From_DT=('created_at', 'min'),
-                    To_DT=('created_at', 'max'),
+                    Trigger_DT=('created_at', 'min'), # The exact moment the 2-hour buffer was satisfied
+                    To_DT=('created_at', 'max'),      # When the wasted cooling finally stopped
                     Avg_Temp=('TypeB_Temp', 'mean')
                 )
                 
+                # RECLAIM THE BUFFER: Subtract 110 minutes (11 intervals of 10 mins) to get the true start time
+                event_summary['From_DT'] = event_summary['Trigger_DT'] - pd.Timedelta(minutes=110)
+                
+                # Calculate true total duration (To - From + 10 min final interval)
                 event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT'] + pd.Timedelta(minutes=10)
+                
+                # Format for display
                 event_summary['Start Date'] = event_summary['From_DT'].dt.strftime('%Y-%m-%d')
                 event_summary['Day'] = event_summary['From_DT'].dt.strftime('%A')
                 event_summary['From Time'] = event_summary['From_DT'].dt.strftime('%H:%M')
