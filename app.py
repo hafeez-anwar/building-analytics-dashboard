@@ -187,10 +187,12 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
     
     with st.expander("⚙️ View Algorithm Logic & Thresholds"):
         st.markdown("""
-        **How do we define 'Wasted Cooling'?** We use a **2-Hour Thermal Lag Buffer**. The system will only flag wasted cooling if ALL three conditions below are met **continuously for 2 hours** (12 consecutive readings). This ensures we do not falsely flag a room that is naturally warming up after the AC shuts off.
+        **How do we define 'Wasted Cooling'?** We use a **2-Hour Thermal Lag Buffer**. The system groups contiguous blocks of time where the room is:
         * **`Luminance < 10` (Lights Off)**
         * **`CO2 < 600 ppm` (Unoccupied)**
         * **`Temperature < 26.0°C` (Actively Cooled)**
+        
+        If this state lasts for **more than 2 hours**, it is logged. The first 2 hours are considered "natural thermal lag" and are subtracted from the penalty.
         """)
     
     req_sensors = ['TypeB_Luminance', 'TypeB_CO2_ppm', 'TypeB_Temp']
@@ -202,72 +204,89 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
         # 1. Evaluate the base condition row-by-row
         calc_df['base_waste_cond'] = (calc_df['TypeB_Luminance'] < 10) & (calc_df['TypeB_CO2_ppm'] < 600) & (calc_df['TypeB_Temp'] < 26.0)
         
-        # 2. Require the condition to be continuously true for 2 hours (12 periods)
-        calc_df['is_wasted_cooling'] = calc_df['base_waste_cond'].rolling(window=12, min_periods=12).sum() == 12
+        # 2. Group consecutive blocks of True conditions
+        calc_df['waste_group'] = (calc_df['base_waste_cond'] != calc_df['base_waste_cond'].shift()).cumsum()
+        true_blocks = calc_df[calc_df['base_waste_cond']]
         
-        # Note: We calculate wasted hours using the true flagged rows (which excludes the buffer)
-        # for the high-level metric so it strictly represents purely wasted energy beyond the natural lag.
-        wasted_hours = len(calc_df[calc_df['is_wasted_cooling']]) / 6
+        wasted_hours_total = 0.0
         
         col1, col2 = st.columns([1, 2])
-        with col1:
-            st.metric("Total Sustained Wasted Hours", f"{wasted_hours:.1f} hrs", help="Excludes the initial 2-hour thermal lag buffer.")
+        
+        if len(true_blocks) > 0:
+            # 3. Aggregate ONLY the valid contiguous blocks
+            event_summary = true_blocks.groupby('waste_group').agg(
+                From_DT=('created_at', 'min'),
+                To_DT=('created_at', 'max'),
+                Avg_Temp=('TypeB_Temp', 'mean')
+            )
             
-            # Gauge Chart
-            max_gauge_val = max(50, wasted_hours * 1.5) if wasted_hours > 0 else 50
-            fig_gauge = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=wasted_hours,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Wasted Hours Gauge"},
-                gauge={
-                    'axis': {'range': [None, max_gauge_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "#EF553B"},
-                    'bgcolor': "white",
-                    'borderwidth': 2,
-                    'bordercolor': "gray",
-                    'steps': [
-                        {'range': [0, max_gauge_val * 0.3], 'color': "#e6f2ff"},
-                        {'range': [max_gauge_val * 0.3, max_gauge_val * 0.7], 'color': "#cce5ff"}],
-                }
-            ))
-            fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
-            st.plotly_chart(fig_gauge, use_container_width=True)
-
-        with col2:
-            waste_df = calc_df[calc_df['is_wasted_cooling']]
-            if len(waste_df) > 0:
-                fig_timeline = px.scatter(waste_df, x='created_at', y='TypeB_Temp', color_discrete_sequence=['red'], title="Timeline of Sustained Wasted Cooling")
-                st.plotly_chart(fig_timeline, use_container_width=True)
+            # 4. Calculate strict duration based ONLY on visible timestamps
+            event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT']
+            event_summary['Total Duration (hrs)'] = (event_summary['Duration'].dt.total_seconds() / 3600).round(2)
+            
+            # 5. FILTER: Keep only events lasting at least 2 hours (using 1.95 to catch 1.99 float math quirks)
+            valid_events = event_summary[event_summary['Total Duration (hrs)'] >= 1.95].copy()
+            
+            if len(valid_events) > 0:
+                # Calculate actual waste (Total Duration minus the 2-hour acceptable thermal lag)
+                valid_events['Wasted Hours (Penalty)'] = (valid_events['Total Duration (hrs)'] - 2.0).clip(lower=0).round(2)
                 
-                # --- Event Grouping and Logging ---
-                calc_df['waste_group'] = (calc_df['is_wasted_cooling'] != calc_df['is_wasted_cooling'].shift()).cumsum()
-                event_summary = calc_df[calc_df['is_wasted_cooling']].groupby('waste_group').agg(
-                    Trigger_DT=('created_at', 'min'), # The exact moment the 2-hour buffer was satisfied
-                    To_DT=('created_at', 'max'),      # When the wasted cooling finally stopped
-                    Avg_Temp=('TypeB_Temp', 'mean')
-                )
-                
-                # RECLAIM THE BUFFER: Subtract 110 minutes (11 intervals of 10 mins) to get the true start time
-                event_summary['From_DT'] = event_summary['Trigger_DT'] - pd.Timedelta(minutes=110)
-                
-                # Calculate true total duration (To - From + 10 min final interval)
-                event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT'] + pd.Timedelta(minutes=10)
+                wasted_hours_total = valid_events['Wasted Hours (Penalty)'].sum()
                 
                 # Format for display
-                event_summary['Start Date'] = event_summary['From_DT'].dt.strftime('%Y-%m-%d')
-                event_summary['Day'] = event_summary['From_DT'].dt.strftime('%A')
-                event_summary['From Time'] = event_summary['From_DT'].dt.strftime('%H:%M')
-                event_summary['End Date'] = event_summary['To_DT'].dt.strftime('%Y-%m-%d')
-                event_summary['To Time'] = event_summary['To_DT'].dt.strftime('%H:%M')
-                event_summary['Total Hours'] = (event_summary['Duration'].dt.total_seconds() / 3600).round(2)
-                event_summary['Avg Temp (°C)'] = event_summary['Avg_Temp'].round(2)
+                valid_events['Start Date'] = valid_events['From_DT'].dt.strftime('%Y-%m-%d')
+                valid_events['Day'] = valid_events['From_DT'].dt.strftime('%A')
+                valid_events['From Time'] = valid_events['From_DT'].dt.strftime('%H:%M')
+                valid_events['End Date'] = valid_events['To_DT'].dt.strftime('%Y-%m-%d')
+                valid_events['To Time'] = valid_events['To_DT'].dt.strftime('%H:%M')
+                valid_events['Avg Temp (°C)'] = valid_events['Avg_Temp'].round(2)
                 
-                display_waste = event_summary[['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Hours', 'Avg Temp (°C)']].reset_index(drop=True)
+                display_cols = ['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Duration (hrs)', 'Wasted Hours (Penalty)', 'Avg Temp (°C)']
+                display_waste = valid_events[display_cols].reset_index(drop=True)
                 
-                with st.expander("🔍 View Detailed Waste Event Log"):
-                    st.dataframe(display_waste, use_container_width=True)
+                with col1:
+                    st.metric("Total Sustained Wasted Hours", f"{wasted_hours_total:.1f} hrs", help="Total event duration minus the 2-hour thermal lag buffer per event.")
+                    
+                    # Gauge Chart
+                    max_gauge_val = max(50, wasted_hours_total * 1.5) if wasted_hours_total > 0 else 50
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=wasted_hours_total,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "Wasted Hours Gauge"},
+                        gauge={
+                            'axis': {'range': [None, max_gauge_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                            'bar': {'color': "#EF553B"},
+                            'bgcolor': "white",
+                            'borderwidth': 2,
+                            'bordercolor': "gray",
+                            'steps': [
+                                {'range': [0, max_gauge_val * 0.3], 'color': "#e6f2ff"},
+                                {'range': [max_gauge_val * 0.3, max_gauge_val * 0.7], 'color': "#cce5ff"}],
+                        }
+                    ))
+                    fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
+                    st.plotly_chart(fig_gauge, use_container_width=True)
+                    
+                with col2:
+                    # Create a plot showing ONLY the valid long-duration events
+                    valid_group_ids = valid_events.index
+                    plot_df = calc_df[calc_df['waste_group'].isin(valid_group_ids) & calc_df['base_waste_cond']]
+                    
+                    fig_timeline = px.scatter(plot_df, x='created_at', y='TypeB_Temp', color_discrete_sequence=['red'], title="Timeline of Sustained Wasted Cooling")
+                    st.plotly_chart(fig_timeline, use_container_width=True)
+                    
+                    with st.expander("🔍 View Detailed Waste Event Log"):
+                        st.dataframe(display_waste, use_container_width=True)
             else:
+                with col1:
+                    st.metric("Total Sustained Wasted Hours", "0.0 hrs")
+                with col2:
+                    st.success("No sustained wasted cooling detected! System is shutting down efficiently.")
+        else:
+            with col1:
+                st.metric("Total Sustained Wasted Hours", "0.0 hrs")
+            with col2:
                 st.success("No sustained wasted cooling detected! System is shutting down efficiently.")
 
 elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
