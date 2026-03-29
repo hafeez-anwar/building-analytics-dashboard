@@ -210,8 +210,6 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
         
         wasted_hours_total = 0.0
         
-        col1, col2 = st.columns([1, 2])
-        
         if len(true_blocks) > 0:
             # 3. Aggregate ONLY the valid contiguous blocks
             event_summary = true_blocks.groupby('waste_group').agg(
@@ -230,10 +228,9 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
             if len(valid_events) > 0:
                 # Calculate actual waste (Total Duration minus the 2-hour acceptable thermal lag)
                 valid_events['Wasted Hours (Penalty)'] = (valid_events['Total Duration (hrs)'] - 2.0).clip(lower=0).round(2)
-                
                 wasted_hours_total = valid_events['Wasted Hours (Penalty)'].sum()
                 
-                # Format for display
+                # Format for display table
                 valid_events['Start Date'] = valid_events['From_DT'].dt.strftime('%Y-%m-%d')
                 valid_events['Day'] = valid_events['From_DT'].dt.strftime('%A')
                 valid_events['From Time'] = valid_events['From_DT'].dt.strftime('%H:%M')
@@ -243,6 +240,24 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                 
                 display_cols = ['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Duration (hrs)', 'Wasted Hours (Penalty)', 'Avg Temp (°C)']
                 display_waste = valid_events[display_cols].reset_index(drop=True)
+                
+                # --- PREPARE DATA FOR VISUALIZATIONS ---
+                valid_group_ids = valid_events.index
+                
+                # Full raw data for the scatter plot (shows the whole event)
+                plot_df = calc_df[calc_df['waste_group'].isin(valid_group_ids) & calc_df['base_waste_cond']].copy()
+                plot_df['created_at'] = pd.to_datetime(plot_df['created_at'])
+                
+                # Strictly penalized data for Bar Chart & Heatmap 
+                # (Drops the first 12 rows / 2 hours of each event so charts map exactly to the penalty)
+                plot_df = plot_df.sort_values(['waste_group', 'created_at'])
+                plot_df_penalty = plot_df.groupby('waste_group').tail(-12).copy()
+                
+                plot_df_penalty['Day_of_Week'] = plot_df_penalty['created_at'].dt.day_name()
+                plot_df_penalty['Hour'] = plot_df_penalty['created_at'].dt.hour
+                
+                # --- LAYOUT BEGINS ---
+                col1, col2 = st.columns([1, 2])
                 
                 with col1:
                     st.metric("Total Sustained Wasted Hours", f"{wasted_hours_total:.1f} hrs", help="Total event duration minus the 2-hour thermal lag buffer per event.")
@@ -268,32 +283,28 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                     fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
                     st.plotly_chart(fig_gauge, use_container_width=True)
                     
-                    # --- NEW: Worst Offenders Bar Chart ---
-                    # Aggregate penalty hours by Day of Week
-                    waste_by_day = valid_events.groupby('Day', observed=False)['Wasted Hours (Penalty)'].sum().reset_index()
+                    # --- Corrected Worst Offenders Bar Chart (Chronological Penalty) ---
+                    # Count penalized intervals per day and convert to hours
+                    day_dist = plot_df_penalty.groupby('Day_of_Week', observed=False).size().reset_index(name='intervals')
+                    day_dist['Penalty Hours'] = (day_dist['intervals'] / 6.0).round(1)
+                    waste_by_day = day_dist.sort_values(by='Penalty Hours', ascending=True)
                     
-                    # Sort by the most wasted hours
-                    waste_by_day = waste_by_day.sort_values(by='Wasted Hours (Penalty)', ascending=True)
-                    
-                    if not waste_by_day.empty and waste_by_day['Wasted Hours (Penalty)'].sum() > 0:
+                    if not waste_by_day.empty and waste_by_day['Penalty Hours'].sum() > 0:
                         fig_worst_day = px.bar(
                             waste_by_day, 
-                            x='Wasted Hours (Penalty)', 
-                            y='Day', 
+                            x='Penalty Hours', 
+                            y='Day_of_Week', 
                             orientation='h', 
-                            title="Worst Offenders: Waste by Day",
+                            title="Worst Offenders (Actual Penalized Hours)",
                             text_auto='.1f',
-                            color='Wasted Hours (Penalty)',
+                            color='Penalty Hours',
                             color_continuous_scale='Reds'
                         )
                         fig_worst_day.update_layout(height=300, showlegend=False, coloraxis_showscale=False, margin=dict(l=10, r=20, t=40, b=20))
                         st.plotly_chart(fig_worst_day, use_container_width=True)
 
                 with col2:
-                    # Create a plot showing ONLY the valid long-duration events
-                    valid_group_ids = valid_events.index
-                    plot_df = calc_df[calc_df['waste_group'].isin(valid_group_ids) & calc_df['base_waste_cond']]
-                    
+                    # Timeline Scatter Plot (Shows the full temperature curve of the events)
                     fig_timeline = px.scatter(
                         plot_df, x='created_at', y='TypeB_Temp', 
                         color_discrete_sequence=['red'], 
@@ -303,12 +314,50 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                     
                     with st.expander("🔍 View Detailed Waste Event Log", expanded=True):
                         st.dataframe(display_waste, use_container_width=True)
+                
+                # --- Scheduling Flaw Heatmap (Chronological Penalty) ---
+                st.markdown("---")
+                st.subheader("Scheduling Flaw Heatmap (Day vs. Time)")
+                st.markdown("Identifies the exact hours of the week when the system is actively bleeding energy (after the 2-hour buffer).")
+                
+                # Count the penalized intervals per Day/Hour and convert to hours
+                heatmap_data = plot_df_penalty.groupby(['Day_of_Week', 'Hour'], observed=False).size().reset_index(name='intervals')
+                heatmap_data['Waste_Hours'] = heatmap_data['intervals'] / 6.0
+                
+                # Pivot and order days
+                days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                heatmap_pivot = heatmap_data.pivot(index='Day_of_Week', columns='Hour', values='Waste_Hours').reindex(days_order).fillna(0)
+                
+                # Ensure all 24 hours exist in columns
+                for h in range(24):
+                    if h not in heatmap_pivot.columns:
+                        heatmap_pivot[h] = 0
+                heatmap_pivot = heatmap_pivot[range(24)] # Sort 0-23
+                
+                # Build the Heatmap
+                fig_heat = px.imshow(
+                    heatmap_pivot,
+                    labels=dict(x="Hour of Day", y="Day of the Week", color="Hours of Waste"),
+                    x=[f"{h:02d}:00" for h in range(24)],
+                    y=days_order,
+                    color_continuous_scale="Reds",
+                    aspect="auto",
+                    text_auto=".1f"
+                )
+                
+                fig_heat.update_xaxes(side="top")
+                fig_heat.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=400)
+                
+                st.plotly_chart(fig_heat, use_container_width=True)
+                
             else:
+                col1, col2 = st.columns([1, 2])
                 with col1:
                     st.metric("Total Sustained Wasted Hours", "0.0 hrs")
                 with col2:
                     st.success("No sustained wasted cooling detected! System is shutting down efficiently.")
         else:
+            col1, col2 = st.columns([1, 2])
             with col1:
                 st.metric("Total Sustained Wasted Hours", "0.0 hrs")
             with col2:
