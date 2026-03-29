@@ -357,29 +357,167 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
     tab1, tab2, tab3, tab4 = st.tabs(["💡 Ghost Lighting", "💨 Ventilation Failure", "❄️ Freezer Zone", "🔧 Sensor Health"])
     calc_df = original_df.copy()
     
-    # --- TAB 1: GHOST LIGHTING ---
+    # --- TAB 1: GHOST LIGHTING (UPGRADED ENGINE) ---
     with tab1:
         st.subheader("Ghost Lighting Detector")
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
             st.markdown("""
-            **Condition for Flagging:**
-            * **`Luminance > 100`:** Lights are actively turned on.
-            * **`CO2 < 450 ppm`:** Absolute baseline atmospheric CO2, proving zero human presence in the area. 
+            **How do we define 'Ghost Lighting'?** We use a **30-Minute Grace Period**. The system groups contiguous blocks of time where the room is:
+            * **`Luminance > 100` (Lights Actively On)**
+            * **`CO2 < 450 ppm` (Absolute Baseline / Zero Human Presence)**
+            
+            If this state lasts for **more than 30 minutes**, it is logged. The first 30 minutes are considered a normal "stepped out for a break" buffer and are subtracted from the penalty.
             """)
         
-        if 'TypeB_Luminance' in calc_df.columns and 'TypeB_CO2_ppm' in calc_df.columns:
-            calc_df['ghost_light'] = (calc_df['TypeB_Luminance'] > 100) & (calc_df['TypeB_CO2_ppm'] < 450)
-            ghost_df = calc_df[calc_df['ghost_light']]
-            ghost_hours = len(ghost_df) / 6
-            
-            st.metric("Total Wasted Lighting Hours", f"{ghost_hours:.1f} hrs")
-            if ghost_hours > 0:
-                fig_ghost = px.scatter(ghost_df, x='created_at', y='TypeB_Luminance', color_discrete_sequence=['gold'], title="Instances of Ghost Lighting")
-                st.plotly_chart(fig_ghost, use_container_width=True)
+        req_sensors = ['TypeB_Luminance', 'TypeB_CO2_ppm']
+        if not all(s in calc_df.columns for s in req_sensors):
+            st.error("Missing required sensors for this analysis (Luminance and CO2).")
         else:
-            st.warning("Missing Luminance or CO2 sensors required for this alert.")
+            # Isolate data for this specific tab to prevent column overlap
+            ghost_calc = calc_df.copy()
+            
+            # 1. Evaluate the base condition using your strict thresholds
+            ghost_calc['base_waste_cond'] = (ghost_calc['TypeB_Luminance'] > 100) & (ghost_calc['TypeB_CO2_ppm'] < 450)
+            
+            # 2. Group contiguous blocks
+            ghost_calc['waste_group'] = (ghost_calc['base_waste_cond'] != ghost_calc['base_waste_cond'].shift()).cumsum()
+            true_blocks = ghost_calc[ghost_calc['base_waste_cond']]
+            
+            wasted_hours_total = 0.0
+            
+            if len(true_blocks) > 0:
+                # 3. Aggregate valid blocks
+                event_summary = true_blocks.groupby('waste_group').agg(
+                    From_DT=('created_at', 'min'),
+                    To_DT=('created_at', 'max'),
+                    Avg_Luminance=('TypeB_Luminance', 'mean')
+                )
+                
+                # 4. Calculate strict duration
+                event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT']
+                event_summary['Total Duration (hrs)'] = (event_summary['Duration'].dt.total_seconds() / 3600).round(2)
+                
+                # 5. FILTER: Keep events >= 30 mins (using 0.45 to catch float math quirks)
+                valid_events = event_summary[event_summary['Total Duration (hrs)'] >= 0.45].copy()
+                
+                if len(valid_events) > 0:
+                    # Calculate penalized waste (Subtract 0.5 hours / 30 mins)
+                    valid_events['Wasted Hours (Penalty)'] = (valid_events['Total Duration (hrs)'] - 0.5).clip(lower=0).round(2)
+                    wasted_hours_total = valid_events['Wasted Hours (Penalty)'].sum()
+                    
+                    # Format for display table
+                    valid_events['Start Date'] = valid_events['From_DT'].dt.strftime('%Y-%m-%d')
+                    valid_events['Day'] = valid_events['From_DT'].dt.strftime('%A')
+                    valid_events['From Time'] = valid_events['From_DT'].dt.strftime('%H:%M')
+                    valid_events['End Date'] = valid_events['To_DT'].dt.strftime('%Y-%m-%d')
+                    valid_events['To Time'] = valid_events['To_DT'].dt.strftime('%H:%M')
+                    valid_events['Avg Luminance'] = valid_events['Avg_Luminance'].round(0)
+                    
+                    display_cols = ['Start Date', 'Day', 'From Time', 'End Date', 'To Time', 'Total Duration (hrs)', 'Wasted Hours (Penalty)', 'Avg Luminance']
+                    display_waste = valid_events[display_cols].reset_index(drop=True)
+                    
+                    # --- PREPARE DATA FOR VISUALIZATIONS ---
+                    valid_group_ids = valid_events.index
+                    plot_df = ghost_calc[ghost_calc['waste_group'].isin(valid_group_ids) & ghost_calc['base_waste_cond']].copy()
+                    plot_df['created_at'] = pd.to_datetime(plot_df['created_at'])
+                    
+                    # Strictly penalized data (Drops first 3 rows / 30 mins)
+                    plot_df = plot_df.sort_values(['waste_group', 'created_at'])
+                    plot_df_penalty = plot_df.groupby('waste_group').tail(-3).copy()
+                    plot_df_penalty['Day_of_Week'] = plot_df_penalty['created_at'].dt.day_name()
+                    plot_df_penalty['Hour'] = plot_df_penalty['created_at'].dt.hour
+                    
+                    # --- UI LAYOUT ---
+                    st.markdown("---")
+                    
+                    col_gauge, col_bar = st.columns([1, 1.5])
+                    
+                    with col_gauge:
+                        st.metric("Total Penalized Wasted Hours", f"{wasted_hours_total:.1f} hrs")
+                        max_gauge_val = max(50, wasted_hours_total * 1.5) if wasted_hours_total > 0 else 50
+                        fig_gauge = go.Figure(go.Indicator(
+                            mode="gauge+number",
+                            value=wasted_hours_total,
+                            domain={'x': [0, 1], 'y': [0, 1]},
+                            gauge={
+                                'axis': {'range': [None, max_gauge_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                                'bar': {'color': "#F4B400"}, 
+                                'bgcolor': "white",
+                                'borderwidth': 2,
+                                'bordercolor': "gray",
+                                'steps': [
+                                    {'range': [0, max_gauge_val * 0.3], 'color': "#fff9e6"},
+                                    {'range': [max_gauge_val * 0.3, max_gauge_val * 0.7], 'color': "#ffedb3"}],
+                            }
+                        ))
+                        fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=30, b=20))
+                        st.plotly_chart(fig_gauge, use_container_width=True)
+                    
+                    with col_bar:
+                        day_dist = plot_df_penalty.groupby('Day_of_Week', observed=False).size().reset_index(name='intervals')
+                        day_dist['Penalty Hours'] = (day_dist['intervals'] / 6.0).round(1)
+                        waste_by_day = day_dist.sort_values(by='Penalty Hours', ascending=True)
+                        
+                        if not waste_by_day.empty and waste_by_day['Penalty Hours'].sum() > 0:
+                            fig_worst_day = px.bar(
+                                waste_by_day, 
+                                x='Penalty Hours', 
+                                y='Day_of_Week', 
+                                orientation='h', 
+                                title="Worst Offenders (Penalized Hours by Day)",
+                                text_auto='.1f',
+                                color='Penalty Hours',
+                                color_continuous_scale='YlOrBr' 
+                            )
+                            fig_worst_day.update_layout(height=320, showlegend=False, coloraxis_showscale=False, margin=dict(l=10, r=20, t=40, b=20))
+                            st.plotly_chart(fig_worst_day, use_container_width=True)
 
-    # --- TAB 2: VENTILATION FAILURE ---
+                    st.markdown("---")
+                    st.markdown("**📅 Lighting Schedule Flaw Heatmap**")
+                    st.markdown("Pinpoints exactly when lights are being left on overnight or during weekends.")
+                    
+                    heatmap_data = plot_df_penalty.groupby(['Day_of_Week', 'Hour'], observed=False).size().reset_index(name='intervals')
+                    heatmap_data['Waste_Hours'] = heatmap_data['intervals'] / 6.0
+                    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                    heatmap_pivot = heatmap_data.pivot(index='Day_of_Week', columns='Hour', values='Waste_Hours').reindex(days_order).fillna(0)
+                    
+                    for h in range(24):
+                        if h not in heatmap_pivot.columns:
+                            heatmap_pivot[h] = 0
+                    heatmap_pivot = heatmap_pivot[range(24)]
+                    
+                    fig_heat = px.imshow(
+                        heatmap_pivot,
+                        labels=dict(x="Hour of Day", y="Day of the Week", color="Hours of Waste"),
+                        x=[f"{h:02d}:00" for h in range(24)],
+                        y=days_order,
+                        color_continuous_scale="YlOrBr",
+                        aspect="auto",
+                        text_auto=".1f"
+                    )
+                    fig_heat.update_xaxes(side="top")
+                    fig_heat.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=350)
+                    st.plotly_chart(fig_heat, use_container_width=True)
+                    
+                    st.markdown("---")
+                    
+                    fig_timeline = px.scatter(
+                        plot_df, x='created_at', y='TypeB_Luminance', 
+                        color_discrete_sequence=['#F4B400'], 
+                        title="Luminance Profile During Ghost Lighting Events"
+                    )
+                    fig_timeline.update_layout(height=350, margin=dict(l=20, r=20, t=40, b=20))
+                    st.plotly_chart(fig_timeline, use_container_width=True)
+                    
+                    st.markdown("**Detailed Waste Event Log**")
+                    st.dataframe(display_waste, use_container_width=True, hide_index=True)
+                    
+                else:
+                    st.success("No sustained ghost lighting detected! Good job turning off the lights.")
+            else:
+                st.success("No sustained ghost lighting detected! Good job turning off the lights.")
+
+    # --- TAB 2: VENTILATION FAILURE (UNCHANGED) ---
     with tab2:
         st.subheader("Stuffy Air / Ventilation Alert")
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
@@ -402,7 +540,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
                 fig_vent.add_hline(y=1000, line_dash="dash", line_color="red", annotation_text="ASHRAE Limit")
                 st.plotly_chart(fig_vent, use_container_width=True)
                 
-                # --- NEW: Event Grouping and Logging ---
+                # --- Event Grouping and Logging ---
                 calc_df['vent_group'] = (calc_df['poor_ventilation'] != calc_df['poor_ventilation'].shift()).cumsum()
                 event_summary = calc_df[calc_df['poor_ventilation']].groupby('vent_group').agg(
                     From_DT=('created_at', 'min'),
@@ -430,7 +568,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         else:
             st.warning("Missing CO2 sensor required for this alert.")
 
-    # --- TAB 3: FREEZER Zone ---
+    # --- TAB 3: FREEZER Zone (UNCHANGED) ---
     with tab3:
         st.subheader("Overcooling / Freezer Zone")
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
@@ -456,7 +594,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
                 fig_freeze = px.scatter(freeze_df, x='created_at', y='Temp_Rolling_Avg', color_discrete_sequence=['blue'], title="Sustained Overcooling Events (30-Min Avg)")
                 st.plotly_chart(fig_freeze, use_container_width=True)
                 
-                # --- NEW: Event Grouping and Logging ---
+                # --- Event Grouping and Logging ---
                 calc_df['freeze_group'] = (calc_df['freezer_zone'] != calc_df['freezer_zone'].shift()).cumsum()
                 event_summary = calc_df[calc_df['freezer_zone']].groupby('freeze_group').agg(
                     From_DT=('created_at', 'min'),
@@ -483,7 +621,7 @@ elif analysis_mode == "5. Smart Alerts & Diagnostics 🚨":
         else:
             st.warning("Missing Temp, Luminance, or CO2 sensors required for this alert.")
 
-    # --- TAB 4: SENSOR HEALTH ---
+    # --- TAB 4: SENSOR HEALTH (UNCHANGED) ---
     with tab4:
         st.subheader("Hardware Flatline Detector")
         with st.expander("⚙️ View Algorithm Logic & Thresholds"):
