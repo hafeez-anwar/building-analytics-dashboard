@@ -224,7 +224,7 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
             event_summary['Duration'] = event_summary['To_DT'] - event_summary['From_DT']
             event_summary['Total Duration (hrs)'] = (event_summary['Duration'].dt.total_seconds() / 3600).round(2)
             
-            # 5. FILTER: Keep only events lasting at least 2 hours (using 1.95 to catch 1.99 float math quirks)
+            # 5. FILTER: Keep only events lasting at least 2 hours (using 1.95 to catch float math quirks)
             valid_events = event_summary[event_summary['Total Duration (hrs)'] >= 1.95].copy()
             
             if len(valid_events) > 0:
@@ -253,7 +253,7 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                         mode="gauge+number",
                         value=wasted_hours_total,
                         domain={'x': [0, 1], 'y': [0, 1]},
-                        title={'text': "Wasted Hours Gauge"},
+                        title={'text': "Total Waste Pipeline"},
                         gauge={
                             'axis': {'range': [None, max_gauge_val], 'tickwidth': 1, 'tickcolor': "darkblue"},
                             'bar': {'color': "#EF553B"},
@@ -268,15 +268,40 @@ elif analysis_mode == "4. HVAC Energy Efficiency 💡":
                     fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
                     st.plotly_chart(fig_gauge, use_container_width=True)
                     
+                    # --- NEW: Worst Offenders Bar Chart ---
+                    # Aggregate penalty hours by Day of Week
+                    waste_by_day = valid_events.groupby('Day', observed=False)['Wasted Hours (Penalty)'].sum().reset_index()
+                    
+                    # Sort by the most wasted hours
+                    waste_by_day = waste_by_day.sort_values(by='Wasted Hours (Penalty)', ascending=True)
+                    
+                    if not waste_by_day.empty and waste_by_day['Wasted Hours (Penalty)'].sum() > 0:
+                        fig_worst_day = px.bar(
+                            waste_by_day, 
+                            x='Wasted Hours (Penalty)', 
+                            y='Day', 
+                            orientation='h', 
+                            title="Worst Offenders: Waste by Day",
+                            text_auto='.1f',
+                            color='Wasted Hours (Penalty)',
+                            color_continuous_scale='Reds'
+                        )
+                        fig_worst_day.update_layout(height=300, showlegend=False, coloraxis_showscale=False, margin=dict(l=10, r=20, t=40, b=20))
+                        st.plotly_chart(fig_worst_day, use_container_width=True)
+
                 with col2:
                     # Create a plot showing ONLY the valid long-duration events
                     valid_group_ids = valid_events.index
                     plot_df = calc_df[calc_df['waste_group'].isin(valid_group_ids) & calc_df['base_waste_cond']]
                     
-                    fig_timeline = px.scatter(plot_df, x='created_at', y='TypeB_Temp', color_discrete_sequence=['red'], title="Timeline of Sustained Wasted Cooling")
+                    fig_timeline = px.scatter(
+                        plot_df, x='created_at', y='TypeB_Temp', 
+                        color_discrete_sequence=['red'], 
+                        title="Timeline of Sustained Wasted Cooling"
+                    )
                     st.plotly_chart(fig_timeline, use_container_width=True)
                     
-                    with st.expander("🔍 View Detailed Waste Event Log"):
+                    with st.expander("🔍 View Detailed Waste Event Log", expanded=True):
                         st.dataframe(display_waste, use_container_width=True)
             else:
                 with col1:
